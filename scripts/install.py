@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ def fail(message):
 
 def profile_page():
     if not PROFILE_ROOT.is_dir():
-        fail("找不到乌兰子工作室的配置目录。请先安装并打开乌兰子工作室（Ulanzi Studio），连接 AU05-X。")
+        fail("找不到优篮子工作室的配置目录。请先安装并打开优篮子工作室（Ulanzi Studio），连接 AU05-X。")
 
     configured_device = configured_name = None
     settings = ULANZI / "config/setting_source.json"
@@ -55,12 +56,12 @@ def profile_page():
         if data.get("Device", {}).get("Model") == "AU05-X":
             candidates.append((manifest.parent, data))
     if not candidates:
-        fail("没有找到 AU05-X 的设备预设。请先在乌兰子工作室中创建一个预设。")
+        fail("没有找到 AU05-X 的设备预设。请先在优篮子工作室中创建一个预设。")
 
     matches = [(p, d) for p, d in candidates if d.get("Device", {}).get("UUID") == configured_device and d.get("Name") == configured_name]
     if len(matches) == 1:
         chosen = matches[0]
-    elif len(candidates) == 1:
+    elif len(candidates) == 1 and not configured_device:
         chosen = candidates[0]
     else:
         print("找到多个 AU05-X 预设，请选择要修改的一个：")
@@ -73,9 +74,17 @@ def profile_page():
 
     profile_dir, profile = chosen
     page_id = profile.get("Pages", {}).get("Current")
-    page = profile_dir / "Profiles" / str(page_id) / "manifest.json"
+    if not isinstance(page_id, str) or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", page_id):
+        fail("当前页面标识无效，未修改任何内容。")
+    profiles_dir = profile_dir / "Profiles"
+    page_dir = profiles_dir / page_id
+    page = page_dir / "manifest.json"
+    if profiles_dir.is_symlink() or page_dir.is_symlink() or page.is_symlink():
+        fail("当前页面使用了符号链接，未修改任何内容。")
     if not page.is_file():
         fail("找不到当前预设的页面配置，未修改任何内容。")
+    if page.resolve().parent.parent != profiles_dir.resolve():
+        fail("当前页面不在所选预设内，未修改任何内容。")
     return profile.get("Name") or "未命名", page
 
 
@@ -116,7 +125,7 @@ def stop_studio():
         if run("/usr/bin/pgrep", "-x", "UlanziDeck", check=False).returncode != 0:
             return
         time.sleep(0.2)
-    fail("乌兰子工作室仍在运行。请先退出它，然后重新运行安装程序。")
+    fail("优篮子工作室仍在运行。请先退出它，然后重新运行安装程序。")
 
 
 def install_agent():
@@ -154,11 +163,15 @@ def main():
         backup_dir = DATA / "backups"
         backup_dir.mkdir(exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = backup_dir / f"{stamp}-{page.parent.name}-manifest.json"
+        backup = backup_dir / f"{stamp}-{page.parent.name}-{uuid.uuid4().hex[:8]}-manifest.json"
         shutil.copy2(page, backup)
-        staged = page.with_name("manifest.json.vibekey-tmp")
-        staged.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n")
-        staged.replace(page)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".vibekey-", suffix=".tmp", dir=page.parent, delete=False) as stream:
+            staged = Path(stream.name)
+            stream.write(json.dumps(updated, ensure_ascii=False, indent=2) + "\n")
+        try:
+            staged.replace(page)
+        finally:
+            staged.unlink(missing_ok=True)
 
         try:
             run("/usr/bin/pkill", "-x", "VibeKeyBridge", check=False)

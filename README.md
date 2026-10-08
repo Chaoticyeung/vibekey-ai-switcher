@@ -1,10 +1,10 @@
 # Vibe Key 四应用语音控制
 
-把乌兰子 Vibe Key（AU05-X）的旋钮和三个按键，用来切换克劳德（Claude）、代码助手（Codex）、工作伙伴（WorkBuddy）、深度求索（DeepSeek），并通过听写工具（Typeless）输入语音。
+把优篮子 Vibe Key（AU05-X）的旋钮和三个按键，用来切换克劳德（Claude）、代码助手（Codex）、工作伙伴（WorkBuddy）、深度求索（DeepSeek），并通过听写工具（Typeless）输入语音。
 
 ## 准备
 
-- macOS、乌兰子工作室（Ulanzi Studio）和已配对的 AU05-X。
+- macOS、[优篮子工作室（Ulanzi Studio）官方下载页](https://www.ulanzi.com/pages/ulanzi-app)提供的应用，以及已配对的 AU05-X。
 - 已安装想要控制的应用，以及听写工具（Typeless）。听写快捷键设为**右 Option 键**。
 - 苹果的 Swift 编译工具。若尚未安装，先运行 `xcode-select --install`。
 
@@ -18,7 +18,7 @@
 git clone https://github.com/Chaoticyeung/vibekey-ai-switcher.git && cd vibekey-ai-switcher && sh install.command
 ```
 
-也可以下载本仓库的压缩包，解压后双击 `install.command`。安装程序会找到当前选中的 AU05-X 预设、备份原文件、写入按键配置、编译控制程序，并设置登录后启动。若有多个预设且无法确认当前预设，会让你选择。
+也可以下载本仓库的压缩包，解压后双击 `install.command`。安装程序会找到当前选中的 AU05-X 预设、备份原文件、写入按键配置、编译控制程序，并设置登录后启动。若无法确认当前预设，会让你选择。
 
 **首次安装后**，请到“系统设置 → 隐私与安全性 → 辅助功能”允许 `VibeKeyBridge`。更新程序后如失效，可关闭再打开该权限。macOS 要求这一步由本人完成。
 
@@ -29,23 +29,30 @@ git clone https://github.com/Chaoticyeung/vibekey-ai-switcher.git && cd vibekey-
 | 旋钮直接左转／右转 | 在四个应用间切换选择，屏幕短暂显示选中项 |
 | 按下旋钮 | 打开选中的应用 |
 | 上方小键 | 开始／结束语音输入 |
-| 中间对勾键 | 识别到成对授权按钮时确认；否则发送输入框中的消息 |
-| 下方叉号键 | 识别到成对授权按钮时否决；否则发送退出／停止键 |
+| 中间对勾键 | 唯一识别到授权对话框时确认；普通输入界面发送消息 |
+| 下方叉号键 | 唯一识别到授权对话框时否决；普通输入界面发送退出／停止键 |
 
 应用顺序：克劳德（Claude）→ 代码助手（Codex）→ 工作伙伴（WorkBuddy）→ 深度求索（DeepSeek）。
 
 说完可按上方小键结束语音；也可直接按对勾键。直接按对勾时，程序最多等待 20 秒，确认文字进入输入框后再发送。若文字没有进入，会提示“暂未发送”。
 
-授权按钮识别使用窗口文字匹配；四个应用的真实授权弹窗仍需逐一验证。遇到未识别的弹窗，请先用鼠标处理。
+授权按钮只会在唯一可识别的授权对话框中自动按下；出现多个候选或无法确认对话框时，会提示手动处理。四个应用的真实授权弹窗仍需逐一验证。
+
+## 权限、安全与风险
+
+- 授予**辅助功能**后，控制程序能够读取目标应用的界面文字、监听全局按键，并模拟按键或点击授权按钮。这是实现切换、语音输入和确认操作所必需的较高权限。程序只处理预设组合键，但无法证明按键一定来自 Vibe Key；普通键盘输入相同组合键也会触发。
+- 安装程序会修改当前设备预设，并注册用户级登录启动项。它会先备份原配置，但安装中断或第三方应用更新仍可能导致配置失效。安装前请检查仓库源码；上面的一行命令获取的是执行时的最新主分支。
+- 授权识别依赖目标应用提供的辅助功能界面。无法唯一确认授权对话框时会停止自动操作；即使识别成功，仍请在按对勾前看清授权内容。听写由第三方 Typeless 提供，本项目不控制其录音处理方式。
+- 代码安全检查（Codex Security）在初版发现两项中等风险：预设页面路径可越界、授权按钮可能错配。本版增加了页面路径校验与唯一授权对话框限制。扫描只覆盖本仓库当时的源码，不等于对优篮子工作室或四个目标应用的安全认证。
+
+**免责声明：**这是社区自定义配置，与优篮子或上述应用的开发商无关联。软件按现状提供；安装者应自行核对来源、备份和授权内容，并承担使用及第三方应用变化带来的风险。
 
 ## 恢复原预设
 
-每次安装前，原页面配置会保存到 `~/Library/Application Support/VibeKeyBridge/backups/`。退出乌兰子工作室后，将相应备份复制回原预设页面的 `manifest.json`，再重新打开乌兰子工作室。程序本体位于 `~/Applications/VibeKeyBridge.app`；登录启动项位于 `~/Library/LaunchAgents/local.vibekey.bridge.plist`。
+每次安装前，原页面配置会保存到 `~/Library/Application Support/VibeKeyBridge/backups/`。退出优篮子工作室后，将相应备份复制回原预设页面的 `manifest.json`，再重新打开优篮子工作室。程序本体位于 `~/Applications/VibeKeyBridge.app`；登录启动项位于 `~/Library/LaunchAgents/local.vibekey.bridge.plist`。
 
 ## 仓库内容
 
 - `src/VibeKeyBridge.swift`：最终运行程序源码。
 - `config/actions.json`：通用按键配置，不含设备编号或个人路径。
 - `scripts/install.py`、`install.command`：安装与备份。
-
-本项目是个人自定义配置，与乌兰子及上述应用的开发商无关联。

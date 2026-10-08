@@ -226,12 +226,11 @@ private final class Bridge: NSObject, NSApplicationDelegate {
             let target = self.targets[self.selected]
             guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first,
                   let focusedValue = self.axValue(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute) else {
-                self.sendDefaultKey(approve: approve)
+                self.status("cannot inspect active window in \(target.name)")
+                self.showHUD("无法确认当前界面，请手动操作")
                 return
             }
             let focused = focusedValue as! AXUIElement
-            var buttons: [(AXUIElement, String)] = []
-            self.findButtons(in: focused, depth: 0, into: &buttons)
             let strongAllow = ["允许", "批准", "授权", "同意", "allow", "approve", "grant"]
             let strongDeny = ["拒绝", "否决", "不允许", "deny", "reject", "don't allow"]
             let allowWords = strongAllow + ["确认", "继续", "yes"]
@@ -243,19 +242,46 @@ private final class Bridge: NSObject, NSApplicationDelegate {
                     return normalized == $0 || (chinese && normalized.hasPrefix($0)) || normalized.hasPrefix($0 + " ") || normalized.hasPrefix($0 + "（")
                 }
             }
-            let allowed = buttons.first { matches($0.1, allowWords) }
-            let denied = buttons.first { matches($0.1, denyWords) }
-            let authorizationLabelsPresent = buttons.contains { matches($0.1, strongAllow + strongDeny) }
-            guard let allowed, let denied, authorizationLabelsPresent else {
+            var windowButtons: [(AXUIElement, String)] = []
+            self.findButtons(in: focused, depth: 0, into: &windowButtons)
+            let authorizationLabelsPresent = windowButtons.contains { matches($0.1, strongAllow + strongDeny) }
+            var dialogs: [AXUIElement] = []
+            self.findAuthorizationDialogs(in: focused, depth: 0, into: &dialogs)
+            var candidates: [(AXUIElement, AXUIElement)] = []
+            for dialog in dialogs {
+                var buttons: [(AXUIElement, String)] = []
+                self.findButtons(in: dialog, depth: 0, into: &buttons)
+                func uniqueButtons(_ words: [String]) -> [AXUIElement] {
+                    var result: [AXUIElement] = []
+                    for (button, label) in buttons where matches(label, words) {
+                        if !result.contains(where: { CFEqual($0, button) }) { result.append(button) }
+                    }
+                    return result
+                }
+                let allowed = uniqueButtons(allowWords)
+                let denied = uniqueButtons(denyWords)
+                if allowed.count == 1, denied.count == 1,
+                   !CFEqual(allowed[0], denied[0]),
+                   buttons.contains(where: { matches($0.1, strongAllow + strongDeny) }) {
+                    candidates.append((allowed[0], denied[0]))
+                }
+            }
+            guard candidates.count == 1 else {
+                if authorizationLabelsPresent {
+                    self.status("authorization dialog ambiguous in \(target.name)")
+                    self.showHUD("授权界面无法唯一确认，请手动处理")
+                    return
+                }
                 self.sendDefaultKey(approve: approve)
                 return
             }
-            let chosen = approve ? allowed : denied
-            let result = AXUIElementPerformAction(chosen.0, kAXPressAction as CFString)
+            let chosen = approve ? candidates[0].0 : candidates[0].1
+            let result = AXUIElementPerformAction(chosen, kAXPressAction as CFString)
             if result == .success {
                 self.status("authorization \(approve ? "approved" : "denied") in \(target.name)")
             } else {
-                self.sendDefaultKey(approve: approve)
+                self.status("authorization action failed in \(target.name)")
+                self.showHUD("授权操作未完成，请手动处理")
             }
           }
         }
@@ -323,6 +349,20 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func findAuthorizationDialogs(in element: AXUIElement, depth: Int, into result: inout [AXUIElement]) {
+        guard depth < 18 else { return }
+        let role = String(describing: axValue(element, kAXRoleAttribute) ?? "")
+        let subrole = String(describing: axValue(element, kAXSubroleAttribute) ?? "").lowercased()
+        let modal = axValue(element, "AXModal") as? Bool ?? false
+        if role == "AXDialog" || role == "AXSheet" || (role == "AXWindow" && (modal || subrole.contains("dialog"))) {
+            result.append(element)
+            return
+        }
+        for child in axValue(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+            findAuthorizationDialogs(in: child, depth: depth + 1, into: &result)
+        }
+    }
+
     private func buttonLabels(_ element: AXUIElement, depth: Int) -> [String] {
         guard depth < 4 else { return [] }
         var labels: [String] = []
@@ -376,7 +416,12 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         if recording { stopVoice(); return }
         activateTarget {
             self.focusInput()
-            self.recordingInputBefore = self.focusedInputText()
+            guard let baseline = self.focusedInputText() else {
+                self.status("input not found in \(self.targets[self.selected].name)")
+                self.showHUD("未找到输入框，请先点击输入框")
+                return
+            }
+            self.recordingInputBefore = baseline
             self.pendingDictationBaseline = nil
             let running = NSRunningApplication.runningApplications(withBundleIdentifier: "now.typeless.desktop")
             if running.isEmpty {
