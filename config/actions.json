@@ -1,0 +1,104 @@
+[
+  {
+    "Actions": {
+      "0_3": {
+        "Action": "com.ulanzi.ulanzideck.system.hotkey",
+        "ActionParam": {
+          "Action": "com.ulanzi.ulanzideck.system.hotkey",
+          "knob_press": {
+            "Hotkey": "⌃ ⌥ ⇧ 3"
+          },
+          "knob_rotate_left": {
+            "Hotkey": "⌃ ⌥ ⇧ 1"
+          },
+          "knob_rotate_right": {
+            "Hotkey": "⌃ ⌥ ⇧ 2"
+          }
+        },
+        "LinkedTitle": true,
+        "Name": "快捷键",
+        "Plugin": {
+          "Name": "系统",
+          "UUID": "com.ulanzi.deck.system",
+          "Version": "1.0"
+        },
+        "ViewParam": [
+          {
+            "Icon": "",
+            "IconRel": "",
+            "Text": "切换/唤醒AI"
+          }
+        ]
+      }
+    },
+    "Type": "Encoder"
+  },
+  {
+    "Actions": {
+      "0_0": {
+        "Action": "com.ulanzi.ulanzideck.system.hotkey",
+        "ActionParam": {
+          "Action": "com.ulanzi.ulanzideck.system.hotkey",
+          "Hotkey": "⌃ ⌥ ⇧ 4"
+        },
+        "LinkedTitle": true,
+        "Name": "快捷键",
+        "Plugin": {
+          "Name": "系统",
+          "UUID": "com.ulanzi.deck.system",
+          "Version": "1.0"
+        },
+        "ViewParam": [
+          {
+            "Icon": "",
+            "IconRel": "",
+            "Text": "语音开始/结束"
+          }
+        ]
+      },
+      "0_1": {
+        "Action": "com.ulanzi.ulanzideck.system.hotkey",
+        "ActionParam": {
+          "Action": "com.ulanzi.ulanzideck.system.hotkey",
+          "Hotkey": "⌃ ⌥ ⇧ 5"
+        },
+        "LinkedTitle": true,
+        "Name": "快捷键",
+        "Plugin": {
+          "Name": "系统",
+          "UUID": "com.ulanzi.deck.system",
+          "Version": "1.0"
+        },
+        "ViewParam": [
+          {
+            "Icon": "",
+            "IconRel": "",
+            "Text": "确认授权/发送消息"
+          }
+        ]
+      },
+      "0_2": {
+        "Action": "com.ulanzi.ulanzideck.system.hotkey",
+        "ActionParam": {
+          "Action": "com.ulanzi.ulanzideck.system.hotkey",
+          "Hotkey": "⌃ ⌥ ⇧ 6"
+        },
+        "LinkedTitle": true,
+        "Name": "快捷键",
+        "Plugin": {
+          "Name": "系统",
+          "UUID": "com.ulanzi.deck.system",
+          "Version": "1.0"
+        },
+        "ViewParam": [
+          {
+            "Icon": "",
+            "IconRel": "",
+            "Text": "否决授权/停止生成"
+          }
+        ]
+      }
+    },
+    "Type": "Keypad"
+  }
+]
