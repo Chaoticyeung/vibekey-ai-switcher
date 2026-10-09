@@ -26,6 +26,8 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private var hudGeneration = 0
     private var recordingInputBefore: String?
     private var pendingDictationBaseline: String?
+    private var pendingWake: DispatchWorkItem?
+    private var ignoreKnobPressUntil: TimeInterval = 0
     private let statePath = NSString(string: "~/Library/Application Support/VibeKeyBridge/selection.txt").expandingTildeInPath
     private let statusPath = NSString(string: "~/Library/Application Support/VibeKeyBridge/status.txt").expandingTildeInPath
 
@@ -96,10 +98,14 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     private func perform(_ action: Int) {
+        if action != 3 {
+            pendingWake?.cancel()
+            pendingWake = nil
+        }
         switch action {
         case 1: choose((selected + targets.count - 1) % targets.count)
         case 2: choose((selected + 1) % targets.count)
-        case 3: wake()
+        case 3: handleKnobPress()
         case 4: toggleVoice()
         case 5: answerAuthorization(approve: true)
         case 6: answerAuthorization(approve: false)
@@ -109,6 +115,8 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     private func choose(_ index: Int) {
+        pendingWake?.cancel()
+        pendingWake = nil
         stopVoice()
         pendingDictationBaseline = nil
         selected = index
@@ -217,7 +225,30 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         activateTarget {}
     }
 
+    private func handleKnobPress() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now >= ignoreKnobPressUntil else { return }
+        if let pendingWake {
+            pendingWake.cancel()
+            self.pendingWake = nil
+            ignoreKnobPressUntil = now + 0.4
+            newConversation()
+            return
+        }
+        let targetIndex = selected
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingWake = nil
+            guard self.selected == targetIndex else { return }
+            self.wake()
+        }
+        pendingWake = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
     private func newConversation() {
+        pendingWake?.cancel()
+        pendingWake = nil
         stopVoice()
         pendingDictationBaseline = nil
         let targetIndex = selected
