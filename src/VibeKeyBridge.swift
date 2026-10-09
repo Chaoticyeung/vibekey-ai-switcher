@@ -72,6 +72,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
             case 21: action = 4  // 4: voice
             case 23: action = 5  // 5: approve
             case 22: action = 6  // 6: reject
+            case 26: action = 7  // 7: new conversation
             default: action = nil
             }
             guard let action else { return Unmanaged.passUnretained(event) }
@@ -102,6 +103,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         case 4: toggleVoice()
         case 5: answerAuthorization(approve: true)
         case 6: answerAuthorization(approve: false)
+        case 7: newConversation()
         default: break
         }
     }
@@ -170,6 +172,9 @@ private final class Bridge: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        let newChat = NSMenuItem(title: "新建对话（⌃⌥⇧7）", action: #selector(newConversationFromMenu), keyEquivalent: "")
+        newChat.target = self
+        menu.addItem(newChat)
         let quit = NSMenuItem(title: "退出 Vibe Key 控制", action: #selector(quitBridge), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
@@ -177,6 +182,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectFromMenu(_ item: NSMenuItem) { choose(item.tag) }
+    @objc private func newConversationFromMenu() { newConversation() }
     @objc private func quitBridge() { stopVoice(); NSApp.terminate(nil) }
 
     private func activateTarget(_ completion: @escaping () -> Void) {
@@ -209,6 +215,60 @@ private final class Bridge: NSObject, NSApplicationDelegate {
 
     private func wake() {
         activateTarget {}
+    }
+
+    private func newConversation() {
+        stopVoice()
+        pendingDictationBaseline = nil
+        let targetIndex = selected
+        activateTarget {
+            guard self.selected == targetIndex else { return }
+            let target = self.targets[targetIndex]
+            if target.bundleID == "com.anthropic.claudefordesktop" {
+                self.sendKey(45, flags: [.maskCommand])
+                self.status("new conversation in \(target.name)")
+                return
+            }
+            self.pressNewConversationControl(targetIndex: targetIndex, attempts: 8)
+        }
+    }
+
+    private func pressNewConversationControl(targetIndex: Int, attempts: Int) {
+        guard selected == targetIndex else { return }
+        let target = targets[targetIndex]
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == target.bundleID else { return }
+        let label: String
+        let role: String
+        switch target.bundleID {
+        case "com.openai.codex": label = "新聊天"; role = "AXButton"
+        case "com.tencent.workbuddy.mac": label = "新建任务"; role = "AXRadioButton"
+        case "com.deepseek.dsh": label = "新建会话"; role = "AXButton"
+        default: return
+        }
+        var controls: [AXUIElement] = []
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first {
+            let root = AXUIElementCreateApplication(app.processIdentifier)
+            if let window = axValue(root, kAXFocusedWindowAttribute) as! AXUIElement? {
+                findControls(in: window, role: role, label: label, depth: 0, into: &controls)
+            }
+        }
+        guard let control = controls.first else {
+            if attempts > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.pressNewConversationControl(targetIndex: targetIndex, attempts: attempts - 1)
+                }
+            } else {
+                status("new conversation control unavailable in \(target.name)")
+                showHUD("未找到新建对话按钮，请手动操作")
+            }
+            return
+        }
+        guard AXUIElementPerformAction(control, kAXPressAction as CFString) == .success else {
+            status("new conversation action failed in \(target.name)")
+            showHUD("新建对话未完成，请手动操作")
+            return
+        }
+        status("new conversation in \(target.name)")
     }
 
     private func answerAuthorization(approve: Bool) {
@@ -317,15 +377,24 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         let root = AXUIElementCreateApplication(app.processIdentifier)
         guard let focused = axValue(root, kAXFocusedUIElementAttribute) as! AXUIElement? else { return nil }
         let role = String(describing: axValue(focused, kAXRoleAttribute) ?? "")
-        guard role == "AXTextArea", target.bundleID == "com.tencent.workbuddy.mac" || isComposer(focused, for: target) else { return nil }
+        guard role == "AXTextArea",
+              target.bundleID == "com.tencent.workbuddy.mac" || isComposer(focused, for: target) ||
+              (target.bundleID == "com.deepseek.dsh" && isOnlyTextArea(focused, in: root)) else { return nil }
         return axValue(focused, kAXValueAttribute) as? String ?? ""
+    }
+
+    private func isOnlyTextArea(_ focused: AXUIElement, in root: AXUIElement) -> Bool {
+        guard let window = axValue(root, kAXFocusedWindowAttribute) as! AXUIElement? else { return false }
+        var fields: [AXUIElement] = []
+        findControls(in: window, role: "AXTextArea", label: nil, depth: 0, into: &fields)
+        return fields.count == 1 && CFEqual(fields[0], focused)
     }
 
     private func isComposer(_ field: AXUIElement, for target: Target) -> Bool {
         let title = String(describing: axValue(field, kAXTitleAttribute) ?? "")
         let description = String(describing: axValue(field, kAXDescriptionAttribute) ?? "")
         switch target.bundleID {
-        case "com.deepseek.dsh": return description.contains("发消息或创建任务")
+        case "com.deepseek.dsh": return description.contains("发消息或创建任务") || description.contains("描述你想要构建的内容")
         case "com.anthropic.claudefordesktop": return description.contains("提示词")
         case "com.openai.codex": return title.contains("使用 ChatGPT Work")
         default: return true
@@ -353,6 +422,19 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
         for child in axValue(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
             findButtons(in: child, depth: depth + 1, into: &result)
+        }
+    }
+
+    private func findControls(in element: AXUIElement, role: String, label: String?, depth: Int, into result: inout [AXUIElement]) {
+        guard depth < 30, axValue(element, "AXHidden") as? Bool != true else { return }
+        let currentRole = String(describing: axValue(element, kAXRoleAttribute) ?? "")
+        let title = String(describing: axValue(element, kAXTitleAttribute) ?? "")
+        let description = String(describing: axValue(element, kAXDescriptionAttribute) ?? "")
+        if currentRole == role, label == nil || title == label || description == label {
+            result.append(element)
+        }
+        for child in axValue(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+            findControls(in: child, role: role, label: label, depth: depth + 1, into: &result)
         }
     }
 
@@ -430,35 +512,50 @@ private final class Bridge: NSObject, NSApplicationDelegate {
 
     private func toggleVoice() {
         if recording { stopVoice(); return }
+        let targetIndex = selected
         activateTarget {
-            self.focusInput()
-            guard let baseline = self.focusedInputText() else {
-                self.status("input not found in \(self.targets[self.selected].name)")
-                self.showHUD("未找到输入框，请先点击输入框")
+            self.startVoiceWhenInputReady(targetIndex: targetIndex, attempts: 15)
+        }
+    }
+
+    private func startVoiceWhenInputReady(targetIndex: Int, attempts: Int) {
+        guard selected == targetIndex,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == targets[targetIndex].bundleID else { return }
+        focusInput()
+        guard let baseline = focusedInputText() else {
+            if attempts > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.startVoiceWhenInputReady(targetIndex: targetIndex, attempts: attempts - 1)
+                }
+            } else {
+                status("input not found in \(targets[targetIndex].name)")
+                showHUD("未找到输入框，请先点击输入框")
+            }
+            return
+        }
+        recordingInputBefore = baseline
+        pendingDictationBaseline = nil
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "now.typeless.desktop")
+        if running.isEmpty {
+            let typelessPath = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "now.typeless.desktop")?.path ?? "/Applications/Typeless.app"
+            guard FileManager.default.fileExists(atPath: typelessPath) else {
+                status("Typeless not installed")
+                showHUD("未找到听写工具 Typeless")
                 return
             }
-            self.recordingInputBefore = baseline
-            self.pendingDictationBaseline = nil
-            let running = NSRunningApplication.runningApplications(withBundleIdentifier: "now.typeless.desktop")
-            if running.isEmpty {
-                let typelessPath = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "now.typeless.desktop")?.path ?? "/Applications/Typeless.app"
-                guard FileManager.default.fileExists(atPath: typelessPath) else {
-                    self.status("Typeless not installed")
-                    self.showHUD("未找到听写工具 Typeless")
-                    return
-                }
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                process.arguments = ["-gj", "-a", typelessPath]
-                try? process.run()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + (running.isEmpty ? 1.0 : 0.1)) {
-                self.recording = true
-                self.sendRightOptionTap()
-                self.refreshMenu()
-                self.voiceTimeout = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { _ in self.stopVoice() }
-                NSLog("VibeKeyBridge: dictation started")
-            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-gj", "-a", typelessPath]
+            try? process.run()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (running.isEmpty ? 1.0 : 0.1)) {
+            guard self.selected == targetIndex,
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.targets[targetIndex].bundleID else { return }
+            self.recording = true
+            self.sendRightOptionTap()
+            self.refreshMenu()
+            self.voiceTimeout = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { _ in self.stopVoice() }
+            self.status("dictation started in \(self.targets[targetIndex].name)")
         }
     }
 
