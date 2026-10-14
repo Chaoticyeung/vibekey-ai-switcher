@@ -688,7 +688,11 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         down?.flags = .maskAlternate
         up?.flags = []
         down?.post(tap: .cghidEventTap)
-        up?.post(tap: .cghidEventTap)
+        // Typeless observes the modifier transition asynchronously. Give it a
+        // real key press instead of posting both transitions in one run loop.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            up?.post(tap: .cghidEventTap)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) { stopVoice() }
