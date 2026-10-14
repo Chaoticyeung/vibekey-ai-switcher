@@ -17,6 +17,11 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     ]
     private var selected = 2
     private var recording = false
+    private var voiceStarting = false
+    private var voiceStartGeneration = 0
+    private var recordingAppName: String?
+    private var recordingAppPID: pid_t?
+    private var recordingTargetIndex: Int?
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var tapWatchdog: Timer?
@@ -27,6 +32,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private var hudGeneration = 0
     private var recordingInputBefore: String?
     private var pendingDictationBaseline: String?
+    private var pendingUnverifiedDictation = false
     private var pendingWake: DispatchWorkItem?
     private var ignoreKnobPressUntil: TimeInterval = 0
     private let statePath = NSString(string: "~/Library/Application Support/VibeKeyBridge/selection.txt").expandingTildeInPath
@@ -133,17 +139,23 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func choose(_ index: Int) {
+    private func choose(_ index: Int, announce: Bool = true) {
         pendingWake?.cancel()
         pendingWake = nil
         stopVoice()
         pendingDictationBaseline = nil
+        pendingUnverifiedDictation = false
         selected = index
         try? FileManager.default.createDirectory(atPath: (statePath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? String(selected).write(toFile: statePath, atomically: true, encoding: .utf8)
         refreshMenu()
         status("selected \(targets[selected].name)")
-        showHUD("已选择 \(targets[selected].name) · 按下旋钮唤醒")
+        if announce { showHUD("已选择 \(targets[selected].name) · 按下旋钮唤醒") }
+    }
+
+    private func frontmostTargetIndex() -> Int? {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return nil }
+        return targets.firstIndex { $0.bundleID == bundleID }
     }
 
     private func showHUD(_ message: String) {
@@ -189,7 +201,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     private func refreshMenu() {
-        statusItem?.button?.title = recording ? "🎙 \(targets[selected].name)" : "⌘ \(targets[selected].name)"
+        statusItem?.button?.title = recording ? "🎙 \(recordingAppName ?? "当前应用")" : "⌘ \(targets[selected].name)"
         let menu = NSMenu()
         for (index, target) in targets.enumerated() {
             let item = NSMenuItem(title: target.name, action: #selector(selectFromMenu(_:)), keyEquivalent: "")
@@ -270,6 +282,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         pendingWake = nil
         stopVoice()
         pendingDictationBaseline = nil
+        pendingUnverifiedDictation = false
         let targetIndex = selected
         activateTarget {
             guard self.selected == targetIndex else { return }
@@ -322,7 +335,27 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     private func answerAuthorization(approve: Bool) {
+        if voiceStarting {
+            stopVoice()
+            status("dictation had not started; message not sent")
+            showHUD("听写尚未开始，请再按一次语音键")
+            return
+        }
         stopVoice()
+        guard let current = frontmostTargetIndex() else {
+            pendingDictationBaseline = nil
+            pendingUnverifiedDictation = false
+            status("check key unavailable outside supported applications")
+            showHUD("此应用只支持语音输入，对勾不会自动发送")
+            return
+        }
+        if current != selected { choose(current, announce: false) }
+        if pendingUnverifiedDictation {
+            pendingUnverifiedDictation = false
+            status("dictation text could not be verified; message not sent")
+            showHUD("请确认文字进入输入框后手动发送")
+            return
+        }
         if approve, let baseline = pendingDictationBaseline {
             waitForDictation(baseline: baseline, attempts: 80)
             return
@@ -429,7 +462,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         let role = String(describing: axValue(focused, kAXRoleAttribute) ?? "")
         guard role == "AXTextArea",
               target.bundleID == "com.tencent.workbuddy.mac" || isComposer(focused, for: target) ||
-              (target.bundleID == "com.deepseek.dsh" && isOnlyTextArea(focused, in: root)) else { return nil }
+              isOnlyTextArea(focused, in: root) else { return nil }
         return axValue(focused, kAXValueAttribute) as? String ?? ""
     }
 
@@ -572,34 +605,27 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     }
 
     private func toggleVoice() {
-        if recording { stopVoice(); return }
-        let targetIndex = selected
-        activateTarget {
-            self.startVoiceWhenInputReady(targetIndex: targetIndex, attempts: 15)
-        }
-    }
-
-    private func startVoiceWhenInputReady(targetIndex: Int, attempts: Int) {
-        guard selected == targetIndex,
-              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == targets[targetIndex].bundleID else { return }
-        focusInput()
-        guard let baseline = focusedInputText() else {
-            if attempts > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    self.startVoiceWhenInputReady(targetIndex: targetIndex, attempts: attempts - 1)
-                }
-            } else {
-                status("input not found in \(targets[targetIndex].name)")
-                showHUD("未找到输入框，请先点击输入框")
-            }
+        if recording || voiceStarting { stopVoice(); return }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.bundleIdentifier != "local.vibekey.bridge" else {
+            status("no voice destination in front")
+            showHUD("请先点击要输入文字的窗口")
             return
         }
-        recordingInputBefore = baseline
+        let targetIndex = targets.firstIndex { $0.bundleID == frontmost.bundleIdentifier }
+        if let targetIndex, targetIndex != selected {
+            choose(targetIndex, announce: false)
+        }
+        recordingInputBefore = targetIndex == nil ? nil : focusedInputText()
         pendingDictationBaseline = nil
+        pendingUnverifiedDictation = false
+        let destinationPID = frontmost.processIdentifier
+        let destinationName = targetIndex.map { targets[$0].name } ?? frontmost.localizedName ?? "当前应用"
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: "now.typeless.desktop")
         if running.isEmpty {
             let typelessPath = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "now.typeless.desktop")?.path ?? "/Applications/Typeless.app"
             guard FileManager.default.fileExists(atPath: typelessPath) else {
+                recordingInputBefore = nil
                 status("Typeless not installed")
                 showHUD("未找到听写工具 Typeless")
                 return
@@ -609,27 +635,50 @@ private final class Bridge: NSObject, NSApplicationDelegate {
             process.arguments = ["-gj", "-a", typelessPath]
             try? process.run()
         }
+        voiceStarting = true
+        voiceStartGeneration += 1
+        let generation = voiceStartGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + (running.isEmpty ? 1.0 : 0.1)) {
-            guard self.selected == targetIndex,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.targets[targetIndex].bundleID else { return }
+            guard self.voiceStarting, self.voiceStartGeneration == generation else { return }
+            self.voiceStarting = false
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == destinationPID else {
+                self.recordingInputBefore = nil
+                self.status("voice destination changed before recording")
+                self.showHUD("当前窗口已切换，请重新按语音键")
+                return
+            }
             self.recording = true
+            self.recordingAppName = destinationName
+            self.recordingAppPID = destinationPID
+            self.recordingTargetIndex = targetIndex
             self.sendRightOptionTap()
             self.refreshMenu()
             self.voiceTimeout = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { _ in self.stopVoice() }
-            self.status("dictation started in \(self.targets[targetIndex].name)")
+            self.status("dictation started in \(destinationName)")
         }
     }
 
     private func stopVoice() {
+        if voiceStarting {
+            voiceStarting = false
+            voiceStartGeneration += 1
+            recordingInputBefore = nil
+        }
         guard recording else { return }
         sendRightOptionTap()
         recording = false
-        pendingDictationBaseline = recordingInputBefore
+        let sameDestination = NSWorkspace.shared.frontmostApplication?.processIdentifier == recordingAppPID
+        pendingDictationBaseline = sameDestination ? recordingInputBefore : nil
+        pendingUnverifiedDictation = sameDestination && recordingTargetIndex != nil && recordingInputBefore == nil
         recordingInputBefore = nil
+        let destinationName = recordingAppName ?? "当前应用"
+        recordingAppName = nil
+        recordingAppPID = nil
+        recordingTargetIndex = nil
         voiceTimeout?.invalidate()
         voiceTimeout = nil
         refreshMenu()
-        NSLog("VibeKeyBridge: dictation stopped")
+        status("dictation stopped in \(destinationName)")
     }
 
     private func sendRightOptionTap() {
