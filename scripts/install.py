@@ -15,13 +15,16 @@ import time
 import uuid
 from pathlib import Path
 
+import signing
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = Path.home()
 ULANZI = HOME / "Library/Application Support/Ulanzi/UlanziDeck"
 PROFILE_ROOT = ULANZI / "ProfilesV2"
 DATA = HOME / "Library/Application Support/VibeKeyBridge"
-APP = HOME / "Applications/VibeKeyBridge.app"
+USER_APP = HOME / "Applications/VibeKeyBridge.app"
+SYSTEM_APP = Path("/Applications/VibeKeyBridge.app")
 AGENT = HOME / "Library/LaunchAgents/local.vibekey.bridge.plist"
 LABEL = "local.vibekey.bridge"
 
@@ -32,6 +35,26 @@ def run(*args, check=True):
 
 def fail(message):
     raise RuntimeError(message)
+
+
+def app_destination():
+    existing = []
+    for app in (USER_APP, SYSTEM_APP):
+        if not app.exists() and not app.is_symlink():
+            continue
+        if app.is_symlink() or not app.is_dir():
+            fail(f"现有控制程序路径不是普通应用目录：{app}")
+        try:
+            with (app / "Contents/Info.plist").open("rb") as stream:
+                bundle_id = plistlib.load(stream).get("CFBundleIdentifier")
+        except (OSError, ValueError) as error:
+            fail(f"无法确认现有控制程序的身份：{app}（{error}）")
+        if bundle_id != "local.vibekey.bridge":
+            fail(f"现有应用的标识与本项目不同，不会覆盖：{app}")
+        existing.append(app)
+    if len(existing) > 1:
+        fail("发现两份 VibeKeyBridge，请先确认实际使用的安装位置，避免更新到错误程序。")
+    return existing[0] if existing else USER_APP
 
 
 def profile_page():
@@ -108,31 +131,35 @@ def patched_page(page):
     return data
 
 
-def build_app(destination):
+def build_app(destination, identity):
     macos = destination / "Contents/MacOS"
     macos.mkdir(parents=True)
     shutil.copy2(ROOT / "config/Info.plist", destination / "Contents/Info.plist")
     run("/usr/bin/swiftc", "-O", "-framework", "AppKit", "-framework", "ApplicationServices",
         str(ROOT / "src/VibeKeyBridge.swift"), "-o", str(macos / "VibeKeyBridge"))
-    run("/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(destination))
+    run("/usr/bin/codesign", "--force", "--sign", identity, str(destination))
+    run("/usr/bin/codesign", "--verify", str(destination))
+    requirement = run("/usr/bin/codesign", "-d", "-r-", str(destination)).stderr
+    if "cdhash" in requirement.lower():
+        fail("签名仍绑定代码哈希，未安装可能要求重复授权的程序。")
 
 
 def stop_studio():
     if run("/usr/bin/pgrep", "-x", "UlanziDeck", check=False).returncode != 0:
-        return
+        return False
     run("/usr/bin/osascript", "-e", 'tell application "Ulanzi Studio" to quit', check=False)
     for _ in range(40):
         if run("/usr/bin/pgrep", "-x", "UlanziDeck", check=False).returncode != 0:
-            return
+            return True
         time.sleep(0.2)
     fail("优篮子工作室仍在运行。请先退出它，然后重新运行安装程序。")
 
 
-def install_agent():
+def install_agent(app):
     AGENT.parent.mkdir(parents=True, exist_ok=True)
     plist = {
         "Label": LABEL,
-        "ProgramArguments": ["/usr/bin/open", "-g", "-a", str(APP)],
+        "ProgramArguments": ["/usr/bin/open", "-g", "-a", str(app)],
         "RunAtLoad": True,
         "StandardOutPath": str(DATA / "output.log"),
         "StandardErrorPath": str(DATA / "error.log"),
@@ -149,15 +176,19 @@ def main():
         fail("本程序仅支持 macOS。")
     if not Path("/usr/bin/swiftc").exists():
         fail("缺少 Swift 编译工具。请先运行 xcode-select --install。")
+    app = app_destination()
     profile_name, page = profile_page()
     updated = patched_page(page)
+    identity = signing.ensure_identity()
 
     with tempfile.TemporaryDirectory(prefix="vibekey-install-") as temporary:
-        built_app = Path(temporary) / "VibeKeyBridge.app"
+        temporary_dir = Path(temporary)
+        built_app = temporary_dir / "VibeKeyBridge.app"
+        previous_app = temporary_dir / "previous-app"
         print("正在构建控制程序…")
-        build_app(built_app)
+        build_app(built_app, identity)
         print(f"将更新设备预设：{profile_name}")
-        stop_studio()
+        studio_was_running = stop_studio()
 
         DATA.mkdir(parents=True, exist_ok=True)
         backup_dir = DATA / "backups"
@@ -173,22 +204,37 @@ def main():
         finally:
             staged.unlink(missing_ok=True)
 
+        backup_complete = False
+        replacement_started = False
         try:
+            if app.exists():
+                shutil.copytree(app, previous_app)
+                backup_complete = True
             run("/usr/bin/pkill", "-x", "VibeKeyBridge", check=False)
-            APP.parent.mkdir(exist_ok=True)
-            if APP.exists():
-                shutil.rmtree(APP)
-            shutil.copytree(built_app, APP)
-            install_agent()
+            replacement_started = True
+            app.parent.mkdir(exist_ok=True)
+            if app.exists():
+                shutil.rmtree(app)
+            shutil.copytree(built_app, app)
+            install_agent(app)
         except Exception:
             shutil.copy2(backup, page)
+            if replacement_started:
+                if app.exists():
+                    shutil.rmtree(app)
+                if backup_complete:
+                    shutil.copytree(previous_app, app)
+                    run("/usr/bin/open", "-g", "-a", str(app), check=False)
             raise
         finally:
-            run("/usr/bin/open", "-a", "Ulanzi Studio", check=False)
+            if studio_was_running:
+                print("优篮子工作室已退出。安装完成后请手动打开，以加载更新后的预设。")
 
     print("安装完成。")
+    print(f"控制程序位置：{app}")
     print(f"原设备预设已备份：{backup}")
-    print("请在系统设置 → 隐私与安全性 → 辅助功能中允许 VibeKeyBridge；如果已允许过旧版本，请关闭再打开该开关。")
+    print("首次安装或从临时签名迁移时，请在系统设置 → 隐私与安全性 → 辅助功能中允许 VibeKeyBridge。")
+    print("此后的更新会复用本机签名身份，不应要求再次授权；若身份丢失，安装会停止而非换成临时签名。")
     print("听写工具 Typeless 的听写快捷键需设为右 Option 键。")
 
 
