@@ -18,7 +18,8 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private var selected = 2
     private var recording = false
     private var tap: CFMachPort?
-    private var retryTimer: Timer?
+    private var tapSource: CFRunLoopSource?
+    private var tapWatchdog: Timer?
     private var statusItem: NSStatusItem?
     private var voiceTimeout: Timer?
     private var hud: NSPanel?
@@ -45,12 +46,8 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         refreshMenu()
         status("launched")
-        let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(prompt)
         installTap()
-        if tap == nil {
-            retryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in self.installTap() }
-        }
+        tapWatchdog = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in self.ensureTap() }
     }
 
     private func installTap() {
@@ -62,6 +59,10 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, _ in
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                DispatchQueue.main.async { Bridge.shared.ensureTap() }
+                return Unmanaged.passUnretained(event)
+            }
             guard type == .keyDown else { return Unmanaged.passUnretained(event) }
             let required: CGEventFlags = [.maskControl, .maskAlternate, .maskShift]
             guard event.flags.intersection(required) == required else { return Unmanaged.passUnretained(event) }
@@ -90,11 +91,29 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        tapSource = source
         CGEvent.tapEnable(tap: tap, enable: true)
-        retryTimer?.invalidate()
-        retryTimer = nil
         refreshMenu()
         status("ready")
+    }
+
+    private func ensureTap() {
+        guard let tap else {
+            if AXIsProcessTrusted() { installTap() }
+            return
+        }
+        if CFMachPortIsValid(tap), !CGEvent.tapIsEnabled(tap: tap) {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            if CGEvent.tapIsEnabled(tap: tap) { status("keyboard monitoring recovered") }
+        }
+        guard !CFMachPortIsValid(tap) || !CGEvent.tapIsEnabled(tap: tap) else { return }
+        if let tapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes)
+            CFRunLoopSourceInvalidate(tapSource)
+        }
+        self.tap = nil
+        tapSource = nil
+        if AXIsProcessTrusted() { installTap() }
     }
 
     private func perform(_ action: Int) {
@@ -278,7 +297,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
         }
         var controls: [AXUIElement] = []
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first {
-            let root = AXUIElementCreateApplication(app.processIdentifier)
+            let root = accessibilityRoot(for: target, app: app)
             if let window = axValue(root, kAXFocusedWindowAttribute) as! AXUIElement? {
                 findControls(in: window, role: role, label: label, depth: 0, into: &controls)
             }
@@ -320,7 +339,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
                 self.showHUD("无法确认当前界面，请手动操作")
                 return
             }
-            let root = AXUIElementCreateApplication(app.processIdentifier)
+            let root = self.accessibilityRoot(for: target, app: app)
             guard let focusedValue = self.axValue(root, kAXFocusedWindowAttribute) else {
                 self.status("cannot inspect active window in \(target.name)")
                 self.showHUD("无法确认当前界面，请手动操作")
@@ -405,7 +424,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private func focusedInputText() -> String? {
         let target = targets[selected]
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first else { return nil }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let root = accessibilityRoot(for: target, app: app)
         guard let focused = axValue(root, kAXFocusedUIElementAttribute) as! AXUIElement? else { return nil }
         let role = String(describing: axValue(focused, kAXRoleAttribute) ?? "")
         guard role == "AXTextArea",
@@ -441,6 +460,17 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private func axValue(_ element: AXUIElement, _ key: String) -> Any? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success ? value : nil
+    }
+
+    private func accessibilityRoot(for target: Target, app: NSRunningApplication) -> AXUIElement {
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        if target.bundleID == "com.deepseek.dsh",
+           axValue(root, "AXEnhancedUserInterface") as? Bool != true {
+            // DeepSeek may show its composer while hiding the web view from macOS Accessibility.
+            // The setter can report an error even when Electron accepts the new value.
+            _ = AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        }
+        return root
     }
 
     private func findButtons(in element: AXUIElement, depth: Int, into result: inout [(AXUIElement, String)]) {
@@ -507,7 +537,7 @@ private final class Bridge: NSObject, NSApplicationDelegate {
     private func focusInput() {
         let target = targets[selected]
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID).first else { return }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let root = accessibilityRoot(for: target, app: app)
         if let focusedValue = axValue(root, kAXFocusedUIElementAttribute) {
             let focused = focusedValue as! AXUIElement
             let role = String(describing: axValue(focused, kAXRoleAttribute) ?? "")
